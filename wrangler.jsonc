@@ -1,0 +1,16 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "medical-mcp",
+  "main": "src/cloudflare-worker.ts",
+  "compatibility_date": "2026-05-12",
+  "workers_dev": true,
+  "migrations": [
+    {
+      "tag": "v2",
+      "deleted_classes": ["MedicalMcpContainer"]
+    }
+  ],
+  "observability": {
+    "enabled": true
+  }
+}
