@@ -10,6 +10,21 @@ type ToolResult = {
   isError?: boolean;
 };
 
+type LiteratureResult = {
+  title: string;
+  sources: string[];
+  pmid?: string;
+  doi?: string;
+  journal?: string;
+  published?: string;
+  authors?: string[];
+  publicationTypes?: string[];
+  abstract?: string;
+  citations?: number;
+  concepts?: string[];
+  links: string[];
+};
+
 const USER_AGENT = "medical-mcp-cloudflare-worker/1.0";
 
 const tools = [
@@ -79,6 +94,41 @@ const tools = [
           enum: ["relevance", "pub_date"],
           default: "relevance",
         },
+      },
+      required: ["query"],
+    },
+  },
+  {
+    name: "search-literature",
+    description: "Federated abstract search across PubMed, Europe PMC, OpenAlex, and Semantic Scholar with normalized output and deduplication",
+    inputSchema: {
+      type: "object",
+      properties: {
+        query: { type: "string" },
+        sources: {
+          type: "array",
+          items: {
+            type: "string",
+            enum: ["pubmed", "europe_pmc", "openalex", "semantic_scholar"],
+          },
+          default: ["pubmed", "europe_pmc"],
+        },
+        max_results: { type: "number", minimum: 1, maximum: 50, default: 10 },
+        per_source_limit: { type: "number", minimum: 1, maximum: 20, default: 5 },
+        include_abstracts: { type: "boolean", default: true },
+        start_year: { type: "number", minimum: 1800 },
+        end_year: { type: "number", minimum: 1800 },
+        journal: { type: "string" },
+        article_types: {
+          type: "array",
+          items: { type: "string" },
+        },
+        sort: {
+          type: "string",
+          enum: ["relevance", "pub_date"],
+          default: "relevance",
+        },
+        deduplicate: { type: "boolean", default: true },
       },
       required: ["query"],
     },
@@ -346,6 +396,202 @@ function buildPubMedTerm(args: Record<string, unknown>) {
   }
 
   return pieces.filter(Boolean).join(" AND ");
+}
+
+function formatLiteratureResults(results: LiteratureResult[], notes: string[] = [], includeAbstracts = true) {
+  const rows = results.map((result, index) => {
+    const parts = [
+      `${index + 1}. ${result.title || "Untitled"}`,
+      `Sources: ${result.sources.join(", ")}`,
+      result.pmid ? `PMID: ${result.pmid}` : "",
+      result.doi ? `DOI: ${result.doi}` : "",
+      `Journal/Venue: ${result.journal || "Unknown"}`,
+      `Published: ${result.published || "Unknown"}`,
+      result.authors?.length ? `Authors: ${result.authors.join(", ")}` : "",
+      result.publicationTypes?.length ? `Types: ${result.publicationTypes.join("; ")}` : "",
+      typeof result.citations === "number" ? `Citations: ${result.citations}` : "",
+      result.concepts?.length ? `Concepts: ${result.concepts.join("; ")}` : "",
+      includeAbstracts ? `Abstract: ${result.abstract || "No abstract available."}` : "",
+      result.links.length ? `Links:\n${result.links.map(link => `- ${link}`).join("\n")}` : "",
+    ].filter(Boolean);
+    return parts.join("\n");
+  });
+  return textResult(`${notes.length ? `Notes:\n${notes.map(note => `- ${note}`).join("\n")}\n\n` : ""}${rows.join("\n\n") || "No literature results found."}`);
+}
+
+function resultKey(result: LiteratureResult) {
+  if (result.pmid) return `pmid:${result.pmid}`;
+  if (result.doi) return `doi:${result.doi.toLowerCase().replace(/^https?:\/\/(dx\.)?doi\.org\//, "")}`;
+  return `title:${result.title.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim()}`;
+}
+
+function mergeLiteratureResults(results: LiteratureResult[], deduplicate: boolean) {
+  if (!deduplicate) return results;
+  const merged = new Map<string, LiteratureResult>();
+  for (const result of results) {
+    const key = resultKey(result);
+    const existing = merged.get(key);
+    if (!existing) {
+      merged.set(key, result);
+      continue;
+    }
+    existing.sources = [...new Set([...existing.sources, ...result.sources])];
+    existing.links = [...new Set([...existing.links, ...result.links])];
+    existing.abstract ||= result.abstract;
+    existing.pmid ||= result.pmid;
+    existing.doi ||= result.doi;
+    existing.journal ||= result.journal;
+    existing.published ||= result.published;
+    existing.authors = existing.authors?.length ? existing.authors : result.authors;
+    existing.publicationTypes = [...new Set([...(existing.publicationTypes ?? []), ...(result.publicationTypes ?? [])])];
+    existing.concepts = [...new Set([...(existing.concepts ?? []), ...(result.concepts ?? [])])];
+    existing.citations = Math.max(existing.citations ?? 0, result.citations ?? 0) || existing.citations || result.citations;
+  }
+  return [...merged.values()];
+}
+
+async function getPubMedLiterature(args: Record<string, unknown>): Promise<LiteratureResult[]> {
+  const term = buildPubMedTerm(args);
+  const max = asInteger(args.max_results, 5, 1, 20);
+  const sort = asString(args.sort) === "pub_date" ? "pub+date" : "relevance";
+  const search = await fetchJson(
+    `https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?db=pubmed&term=${encodeURIComponent(term)}&retmode=json&retmax=${max}&sort=${sort}`,
+  );
+  const ids = search.esearchresult?.idlist ?? [];
+  if (!ids.length) return [];
+  const xml = await fetchText(
+    `https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=pubmed&id=${ids.join(",")}&retmode=xml`,
+  );
+  return parsePubMedArticles(xml).map(article => ({
+    title: article.title || "Untitled",
+    sources: ["pubmed"],
+    pmid: article.pmid,
+    doi: article.doi,
+    journal: article.journal,
+    published: article.pubDate,
+    authors: article.authors,
+    publicationTypes: article.publicationTypes,
+    abstract: article.abstract,
+    concepts: article.meshTerms,
+    links: [
+      article.pmid ? `PubMed: https://pubmed.ncbi.nlm.nih.gov/${article.pmid}/` : "",
+      article.doi ? `DOI: https://doi.org/${article.doi}` : "",
+      article.pmc ? `Free full text: https://pmc.ncbi.nlm.nih.gov/articles/${article.pmc}/` : "",
+      article.pmc ? `PDF: https://pmc.ncbi.nlm.nih.gov/articles/${article.pmc}/pdf/` : "",
+    ].filter(Boolean),
+  }));
+}
+
+async function getEuropePmcLiterature(args: Record<string, unknown>): Promise<LiteratureResult[]> {
+  const params = new URLSearchParams({
+    query: asString(args.query).trim(),
+    format: "json",
+    resultType: "core",
+    pageSize: String(asInteger(args.max_results, 5, 1, 20)),
+  });
+  const data = await fetchJson(`https://www.ebi.ac.uk/europepmc/webservices/rest/search?${params}`);
+  return (data.resultList?.result ?? []).map((item: any) => ({
+    title: decodeXml(item.title ?? "Untitled"),
+    sources: ["europe_pmc"],
+    pmid: item.pmid,
+    doi: item.doi,
+    journal: item.journalTitle,
+    published: item.firstPublicationDate ?? item.pubYear,
+    authors: item.authorString ? String(item.authorString).split(", ").slice(0, 8) : undefined,
+    publicationTypes: item.pubType ? [item.pubType] : undefined,
+    abstract: decodeXml(item.abstractText ?? ""),
+    citations: typeof item.citedByCount === "number" ? item.citedByCount : undefined,
+    links: [
+      item.pmid ? `PubMed: https://pubmed.ncbi.nlm.nih.gov/${item.pmid}/` : "",
+      item.pmcid ? `Free full text: https://pmc.ncbi.nlm.nih.gov/articles/${item.pmcid}/` : "",
+      item.pmcid ? `PDF: https://pmc.ncbi.nlm.nih.gov/articles/${item.pmcid}/pdf/` : "",
+      item.doi ? `DOI: https://doi.org/${item.doi}` : "",
+      `Europe PMC: https://europepmc.org/article/${item.source}/${item.id}`,
+    ].filter(Boolean),
+  }));
+}
+
+async function getOpenAlexLiterature(args: Record<string, unknown>): Promise<LiteratureResult[]> {
+  const params = new URLSearchParams({
+    search: asString(args.query).trim(),
+    "per-page": String(asInteger(args.max_results, 5, 1, 20)),
+  });
+  const data = await fetchJson(`https://api.openalex.org/works?${params}`);
+  return (data.results ?? []).map((work: any) => {
+    const pdf = work.open_access?.oa_url || work.primary_location?.pdf_url;
+    const landing = work.primary_location?.landing_page_url || work.id;
+    return {
+      title: work.title ?? "Untitled",
+      sources: ["openalex"],
+      pmid: typeof work.ids?.pmid === "string" ? work.ids.pmid.split("/").filter(Boolean).pop() : undefined,
+      doi: work.doi,
+      journal: work.primary_location?.source?.display_name,
+      published: work.publication_date ?? String(work.publication_year ?? ""),
+      authors: (work.authorships ?? []).slice(0, 8).map((a: any) => a.author?.display_name).filter(Boolean),
+      abstract: abstractFromOpenAlex(work.abstract_inverted_index),
+      citations: work.cited_by_count,
+      concepts: (work.concepts ?? []).slice(0, 8).map((concept: any) => concept.display_name).filter(Boolean),
+      links: [
+        work.ids?.pmid ? `PubMed: ${work.ids.pmid}` : "",
+        work.doi ? `DOI: ${work.doi}` : "",
+        landing ? `Landing page: ${landing}` : "",
+        pdf ? `PDF/Open access: ${pdf}` : "",
+        work.id ? `OpenAlex: ${work.id}` : "",
+      ].filter(Boolean),
+    };
+  });
+}
+
+async function getSemanticScholarLiterature(args: Record<string, unknown>): Promise<LiteratureResult[]> {
+  const params = new URLSearchParams({
+    query: asString(args.query).trim(),
+    limit: String(asInteger(args.max_results, 5, 1, 20)),
+    fields: "title,abstract,year,venue,authors,url,publicationTypes,publicationDate,externalIds,openAccessPdf,citationCount",
+  });
+  const data = await fetchJson(`https://api.semanticscholar.org/graph/v1/paper/search?${params}`);
+  return (data.data ?? []).map((paper: any) => ({
+    title: paper.title ?? "Untitled",
+    sources: ["semantic_scholar"],
+    pmid: paper.externalIds?.PubMed,
+    doi: paper.externalIds?.DOI,
+    journal: paper.venue,
+    published: paper.publicationDate ?? String(paper.year ?? ""),
+    authors: (paper.authors ?? []).slice(0, 8).map((author: any) => author.name).filter(Boolean),
+    publicationTypes: paper.publicationTypes,
+    abstract: paper.abstract,
+    citations: paper.citationCount,
+    links: [
+      paper.externalIds?.PubMed ? `PubMed: https://pubmed.ncbi.nlm.nih.gov/${paper.externalIds.PubMed}/` : "",
+      paper.externalIds?.DOI ? `DOI: https://doi.org/${paper.externalIds.DOI}` : "",
+      paper.openAccessPdf?.url ? `PDF/Open access: ${paper.openAccessPdf.url}` : "",
+      paper.url ? `Semantic Scholar: ${paper.url}` : "",
+    ].filter(Boolean),
+  }));
+}
+
+async function searchLiterature(args: Record<string, unknown>) {
+  const requestedSources = asStringArray(args.sources);
+  const sources = requestedSources.length ? requestedSources : ["pubmed", "europe_pmc"];
+  const perSourceLimit = asInteger(args.per_source_limit, 5, 1, 20);
+  const maxResults = asInteger(args.max_results, 10, 1, 50);
+  const notes: string[] = [];
+  const sourceArgs = { ...args, max_results: perSourceLimit };
+  const results: LiteratureResult[] = [];
+
+  for (const source of sources) {
+    try {
+      if (source === "pubmed") results.push(...await getPubMedLiterature(sourceArgs));
+      else if (source === "europe_pmc") results.push(...await getEuropePmcLiterature(sourceArgs));
+      else if (source === "openalex") results.push(...await getOpenAlexLiterature(sourceArgs));
+      else if (source === "semantic_scholar") results.push(...await getSemanticScholarLiterature(sourceArgs));
+      else notes.push(`Unknown source skipped: ${source}`);
+    } catch (error) {
+      notes.push(`${source} failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  const merged = mergeLiteratureResults(results, args.deduplicate !== false).slice(0, maxResults);
+  return formatLiteratureResults(merged, notes, args.include_abstracts !== false);
 }
 
 async function searchDrugs(args: Record<string, unknown>) {
@@ -630,6 +876,8 @@ async function callTool(name: string, args: Record<string, unknown>) {
     case "search-medical-literature":
     case "search-pediatric-literature":
       return searchPubMed(args);
+    case "search-literature":
+      return searchLiterature(args);
     case "get-article-details":
       return getArticleDetails(args);
     case "search-medical-databases":
