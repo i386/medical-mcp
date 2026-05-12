@@ -58,12 +58,27 @@ const tools = [
   },
   {
     name: "search-medical-literature",
-    description: "Search for medical research articles in PubMed",
+    description: "Search PubMed articles with optional abstracts and practical literature-review filters",
     inputSchema: {
       type: "object",
       properties: {
         query: { type: "string" },
-        max_results: { type: "number", minimum: 1, maximum: 20, default: 10 },
+        max_results: { type: "number", minimum: 1, maximum: 50, default: 10 },
+        retstart: { type: "number", minimum: 0, default: 0 },
+        include_abstracts: { type: "boolean", default: true },
+        start_year: { type: "number", minimum: 1800 },
+        end_year: { type: "number", minimum: 1800 },
+        journal: { type: "string" },
+        article_types: {
+          type: "array",
+          items: { type: "string" },
+          description: "PubMed publication types, e.g. Review, Clinical Trial, Meta-Analysis",
+        },
+        sort: {
+          type: "string",
+          enum: ["relevance", "pub_date"],
+          default: "relevance",
+        },
       },
       required: ["query"],
     },
@@ -132,10 +147,99 @@ function asNumber(value: unknown, fallback: number, max: number) {
   );
 }
 
+function asInteger(value: unknown, fallback: number, min: number, max: number) {
+  const number = typeof value === "number" && Number.isFinite(value) ? value : fallback;
+  return Math.min(max, Math.max(min, Math.trunc(number)));
+}
+
+function asStringArray(value: unknown) {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+    : [];
+}
+
 async function fetchJson(url: string) {
   const res = await fetch(url, { headers: { "User-Agent": USER_AGENT } });
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
   return res.json() as Promise<any>;
+}
+
+async function fetchText(url: string) {
+  const res = await fetch(url, { headers: { "User-Agent": USER_AGENT } });
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+  return res.text();
+}
+
+function decodeXml(value: string) {
+  return value
+    .replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, "$1")
+    .replace(/<[^>]+>/g, "")
+    .replace(/&#x([0-9a-fA-F]+);/g, (_, hex) => String.fromCodePoint(parseInt(hex, 16)))
+    .replace(/&#(\d+);/g, (_, decimal) => String.fromCodePoint(parseInt(decimal, 10)))
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, "\"")
+    .replace(/&apos;/g, "'")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function firstMatch(xml: string, pattern: RegExp) {
+  return decodeXml(xml.match(pattern)?.[1] ?? "");
+}
+
+function allMatches(xml: string, pattern: RegExp) {
+  return [...xml.matchAll(pattern)].map(match => decodeXml(match[1])).filter(Boolean);
+}
+
+function parsePubMedArticles(xml: string) {
+  return [...xml.matchAll(/<PubmedArticle\b[\s\S]*?<\/PubmedArticle>/g)].map(match => {
+    const articleXml = match[0];
+    const abstractParts = [...articleXml.matchAll(/<AbstractText\b([^>]*)>([\s\S]*?)<\/AbstractText>/g)]
+      .map(part => {
+        const label = part[1].match(/Label="([^"]+)"/)?.[1];
+        const text = decodeXml(part[2]);
+        return label ? `${decodeXml(label)}: ${text}` : text;
+      })
+      .filter(Boolean);
+
+    return {
+      pmid: firstMatch(articleXml, /<PMID[^>]*>([\s\S]*?)<\/PMID>/),
+      title: firstMatch(articleXml, /<ArticleTitle>([\s\S]*?)<\/ArticleTitle>/),
+      journal: firstMatch(articleXml, /<Journal>[\s\S]*?<Title>([\s\S]*?)<\/Title>[\s\S]*?<\/Journal>/)
+        || firstMatch(articleXml, /<ISOAbbreviation>([\s\S]*?)<\/ISOAbbreviation>/),
+      pubDate: [
+        firstMatch(articleXml, /<PubDate>[\s\S]*?<Year>([\s\S]*?)<\/Year>/),
+        firstMatch(articleXml, /<PubDate>[\s\S]*?<Month>([\s\S]*?)<\/Month>/),
+        firstMatch(articleXml, /<PubDate>[\s\S]*?<Day>([\s\S]*?)<\/Day>/),
+      ].filter(Boolean).join(" ") || firstMatch(articleXml, /<PubDate>[\s\S]*?<MedlineDate>([\s\S]*?)<\/MedlineDate>/),
+      authors: [...articleXml.matchAll(/<Author\b[\s\S]*?<\/Author>/g)].slice(0, 8).map(author => {
+        const lastName = firstMatch(author[0], /<LastName>([\s\S]*?)<\/LastName>/);
+        const initials = firstMatch(author[0], /<Initials>([\s\S]*?)<\/Initials>/);
+        return [lastName, initials].filter(Boolean).join(" ");
+      }).filter(Boolean),
+      publicationTypes: allMatches(articleXml, /<PublicationType[^>]*>([\s\S]*?)<\/PublicationType>/g),
+      meshTerms: allMatches(articleXml, /<DescriptorName[^>]*>([\s\S]*?)<\/DescriptorName>/g).slice(0, 12),
+      abstract: abstractParts.join("\n"),
+    };
+  });
+}
+
+function buildPubMedTerm(args: Record<string, unknown>) {
+  const pieces = [asString(args.query).trim()];
+  const journal = asString(args.journal).trim();
+  const startYear = typeof args.start_year === "number" ? Math.trunc(args.start_year) : undefined;
+  const endYear = typeof args.end_year === "number" ? Math.trunc(args.end_year) : undefined;
+  const articleTypes = asStringArray(args.article_types);
+
+  if (journal) pieces.push(`${journal}[journal]`);
+  if (startYear || endYear) pieces.push(`("${startYear ?? 1800}"[Date - Publication] : "${endYear ?? new Date().getUTCFullYear()}"[Date - Publication])`);
+  if (articleTypes.length) {
+    pieces.push(`(${articleTypes.map(type => `${type}[Publication Type]`).join(" OR ")})`);
+  }
+
+  return pieces.filter(Boolean).join(" AND ");
 }
 
 async function searchDrugs(args: Record<string, unknown>) {
@@ -205,36 +309,50 @@ async function getHealthStatistics(args: Record<string, unknown>) {
 }
 
 async function searchPubMed(args: Record<string, unknown>) {
-  const query = encodeURIComponent(asString(args.query).trim());
-  const max = asNumber(args.max_results, 10, 20);
+  const term = buildPubMedTerm(args);
+  const query = encodeURIComponent(term);
+  const max = asInteger(args.max_results, 10, 1, 50);
+  const retstart = asInteger(args.retstart, 0, 0, 100000);
+  const includeAbstracts = args.include_abstracts !== false;
+  const sort = asString(args.sort) === "pub_date" ? "pub+date" : "relevance";
   const search = await fetchJson(
-    `https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?db=pubmed&term=${query}&retmode=json&retmax=${max}`,
+    `https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?db=pubmed&term=${query}&retmode=json&retmax=${max}&retstart=${retstart}&sort=${sort}`,
   );
   const ids = search.esearchresult?.idlist ?? [];
   if (!ids.length) return textResult("No PubMed articles found.");
-  const summary = await fetchJson(
-    `https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi?db=pubmed&id=${ids.join(",")}&retmode=json`,
+
+  const xml = await fetchText(
+    `https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=pubmed&id=${ids.join(",")}&retmode=xml`,
   );
-  const rows = ids.map((id: string, index: number) => {
-    const article = summary.result?.[id] ?? {};
-    return `${index + 1}. ${article.title ?? "Untitled"}\nPMID: ${id}\nJournal: ${article.fulljournalname ?? "Unknown"}\nPublished: ${article.pubdate ?? "Unknown"}\nURL: https://pubmed.ncbi.nlm.nih.gov/${id}/`;
+  const articles = parsePubMedArticles(xml);
+  const rows = articles.map((article, index) => {
+    const abstract = includeAbstracts
+      ? `\nAbstract: ${article.abstract || "No abstract available."}`
+      : "";
+    const mesh = article.meshTerms.length ? `\nMeSH: ${article.meshTerms.join("; ")}` : "";
+    const types = article.publicationTypes.length ? `\nTypes: ${article.publicationTypes.join("; ")}` : "";
+    const authors = article.authors.length ? `\nAuthors: ${article.authors.join(", ")}` : "";
+    return `${retstart + index + 1}. ${article.title || "Untitled"}\nPMID: ${article.pmid || ids[index]}\nJournal: ${article.journal || "Unknown"}\nPublished: ${article.pubDate || "Unknown"}${authors}${types}${mesh}${abstract}\nURL: https://pubmed.ncbi.nlm.nih.gov/${article.pmid || ids[index]}/`;
   });
-  return textResult(rows.join("\n\n"));
+  return textResult(`Query: ${term}\nShowing ${retstart + 1}-${retstart + rows.length} of ${search.esearchresult?.count ?? "unknown"} PubMed results.\n\n${rows.join("\n\n")}`);
 }
 
 async function getArticleDetails(args: Record<string, unknown>) {
   const pmid = asString(args.pmid).trim();
-  const data = await fetchJson(
-    `https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi?db=pubmed&id=${encodeURIComponent(pmid)}&retmode=json`,
+  const xml = await fetchText(
+    `https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=pubmed&id=${encodeURIComponent(pmid)}&retmode=xml`,
   );
-  const article = data.result?.[pmid];
+  const article = parsePubMedArticles(xml)[0];
   if (!article) return textResult(`No PubMed article found for PMID ${pmid}.`);
   return textResult([
-    article.title ?? "Untitled",
+    article.title || "Untitled",
     `PMID: ${pmid}`,
-    `Journal: ${article.fulljournalname ?? "Unknown"}`,
-    `Published: ${article.pubdate ?? "Unknown"}`,
-    `Authors: ${(article.authors ?? []).map((a: any) => a.name).join(", ") || "Unknown"}`,
+    `Journal: ${article.journal || "Unknown"}`,
+    `Published: ${article.pubDate || "Unknown"}`,
+    `Authors: ${article.authors.join(", ") || "Unknown"}`,
+    `Types: ${article.publicationTypes.join("; ") || "Unknown"}`,
+    `MeSH: ${article.meshTerms.join("; ") || "None listed"}`,
+    `Abstract: ${article.abstract || "No abstract available."}`,
     `URL: https://pubmed.ncbi.nlm.nih.gov/${pmid}/`,
   ].join("\n\n"));
 }
