@@ -1,251 +1,294 @@
-# 🩺 Medical MCP Server
+# Medical MCP
 
-> **Bring trusted medical data directly into your AI workflow.** A local server for private, free access to FDA, WHO, PubMed, RxNorm, and Google Scholar. No API keys. No data leaks.
+Medical MCP is a Model Context Protocol server for biomedical literature search, genetics and metabolomics lookup, drug metadata, and global health statistics.
 
-An [MCP (Model Context Protocol)](https://modelcontextprotocol.io) server that brings authoritative medical information into AI coding environments like Cursor and Claude Desktop.
+This branch adds a Cloudflare Workers deployment with a Streamable HTTP-style JSON-RPC MCP endpoint:
 
-<a href="https://glama.ai/mcp/servers/@JamesANZ/medical-mcp">
-  <img width="380" height="200" src="https://glama.ai/mcp/servers/@JamesANZ/medical-mcp/badge" alt="medical-mcp MCP server" />
-</a>
+```text
+https://medical-mcp.jameswdumay.workers.dev/mcp
+```
 
-[![Trust Score](https://archestra.ai/mcp-catalog/api/badge/quality/JamesANZ/medical-mcp)](https://archestra.ai/mcp-catalog/jamesanz__medical-mcp)
+The Worker implementation is designed for serverless API-backed lookups. It does not run Puppeteer or browser scraping. The original local Node server is still available for local stdio/HTTP use.
 
-## Why Use Medical MCP?
+## What It Is Good For
 
-- 🔒 **Your Data Never Leaves** – Runs 100% locally; no tracking, no logs, no cloud
-- 🆓 **No API Keys** – Works out of the box, zero configuration
-- 🏥 **Authoritative Sources** – FDA, WHO, PubMed, RxNorm, Google Scholar, AAP, pediatric journals
-- ⚡ **Easy Setup** – One-click install in [Cursor](https://cursor.sh) or simple manual setup
-- 🔬 **Comprehensive** – Drug info, health stats, medical literature, clinical guidelines, pediatric sources
+- Searching PubMed and Europe PMC abstracts from an MCP client.
+- Normalizing literature results across multiple scholarly sources.
+- Finding DOI, PubMed, PMC full-text, and PDF/open-access links when APIs expose them.
+- Looking up ClinVar variants, GWAS Catalog studies, Metabolomics Workbench studies, and UniProt protein records.
+- Querying FDA drug labels, RxNorm names, and WHO health statistics.
 
-## Quick Start
+This tool is for research and software workflows. It is not a clinical decision system.
 
-Ready to bring medical intelligence into your AI workflow? Install in seconds:
+## Live Worker
 
-**Install in Cursor (Recommended):**
-
-[🔗 Install in Cursor](cursor://anysphere.cursor-deeplink/mcp/install?name=medical-mcp&config=eyJtZWRpY2FsLW1jcCI6eyJjb21tYW5kIjoibnB4IiwiYXJncyI6WyIteSIsIm1lZGljYWwtbWNwIl19fQ==)
-
-**Or install manually:**
+Root metadata:
 
 ```bash
-npm install -g medical-mcp
-# Or from source:
-git clone https://github.com/JamesANZ/medical-mcp.git
-cd medical-mcp && npm install && npm run build
+curl https://medical-mcp.jameswdumay.workers.dev/
 ```
 
-## Features
+MCP endpoint:
 
-### 💊 Drug Information
-
-- **`search-drugs`** – Search FDA database by brand or generic name
-- **`get-drug-details`** – Get comprehensive drug info by NDC code
-- **`search-drug-nomenclature`** – Standardized drug names via RxNorm
-
-### 📊 Health Statistics
-
-- **`get-health-statistics`** – WHO Global Health Observatory data (life expectancy, mortality, disease prevalence)
-
-### 🔬 Medical Literature
-
-- **`search-medical-literature`** – Search 30M+ PubMed articles
-- **`get-article-details`** – Detailed article info by PMID
-- **`search-google-scholar`** – Academic research with citations
-- **`search-medical-databases`** – Multi-database search (PubMed, Scholar, Cochrane, ClinicalTrials.gov)
-- **`search-medical-journals`** – Top journals (NEJM, JAMA, Lancet, BMJ, Nature Medicine)
-
-### 🏥 Clinical Tools
-
-- **`search-clinical-guidelines`** – Practice recommendations from medical organizations
-
-### 👶 Pediatric Sources
-
-- **`search-pediatric-guidelines`** – AAP guidelines and Bright Futures preventive care
-- **`search-pediatric-literature`** – Research from major pediatric journals (Pediatrics, JAMA Pediatrics, etc.)
-- **`get-child-health-statistics`** – Pediatric health indicators from WHO (mortality, immunization, nutrition)
-- **`search-pediatric-drugs`** – Drugs with pediatric labeling and dosing information
-- **`search-aap-guidelines`** – Comprehensive AAP guideline search (Bright Futures + Policy Statements)
-
-### 📊 Cache Management
-
-- **`get-cache-stats`** – View cache statistics (hit rate, memory usage, entry count)
-
-## Installation
-
-### Cursor (One-Click)
-
-Click the install link above or use:
-
-```
-cursor://anysphere.cursor-deeplink/mcp/install?name=medical-mcp&config=eyJtZWRpY2FsLW1jcCI6eyJjb21tYW5kIjoibnB4IiwiYXJncyI6WyIteSIsIm1lZGljYWwtbWNwIl19fQ==
+```text
+POST https://medical-mcp.jameswdumay.workers.dev/mcp
 ```
 
-### Manual Installation
-
-**Requirements:** Node.js 18+ and npm
+Initialize:
 
 ```bash
-# Clone and build
-git clone https://github.com/JamesANZ/medical-mcp.git
-cd medical-mcp
-npm install
-npm run build
-
-# Run server
-npm start
+curl https://medical-mcp.jameswdumay.workers.dev/mcp \
+  -H 'Content-Type: application/json' \
+  --data '{
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "initialize",
+    "params": {
+      "protocolVersion": "2025-06-18",
+      "capabilities": {},
+      "clientInfo": { "name": "example", "version": "0.0.1" }
+    }
+  }'
 ```
 
-### Claude Desktop
+List tools:
 
-Add to `claude_desktop_config.json`:
+```bash
+curl https://medical-mcp.jameswdumay.workers.dev/mcp \
+  -H 'Content-Type: application/json' \
+  --data '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}'
+```
 
-**macOS**: `~/Library/Application Support/Claude/claude_desktop_config.json`  
-**Windows**: `%APPDATA%\Claude\claude_desktop_config.json`
+## Main Tool: `search-literature`
+
+Use `search-literature` for normalized abstract search across literature sources.
+
+Sources:
+
+- `pubmed`
+- `europe_pmc`
+- `openalex`
+- `semantic_scholar`
+
+Example:
 
 ```json
 {
-  "mcpServers": {
-    "medical-mcp": {
-      "command": "node",
-      "args": ["/absolute/path/to/medical-mcp/build/index.js"]
+  "jsonrpc": "2.0",
+  "id": 3,
+  "method": "tools/call",
+  "params": {
+    "name": "search-literature",
+    "arguments": {
+      "query": "Alzheimer blood biomarkers",
+      "sources": ["pubmed", "europe_pmc"],
+      "max_results": 10,
+      "per_source_limit": 5,
+      "include_abstracts": true,
+      "start_year": 2024,
+      "end_year": 2026,
+      "article_types": ["Review"],
+      "deduplicate": true
     }
   }
 }
 ```
 
-Restart Claude Desktop after configuration.
+Normalized result fields include:
 
-## Usage Examples
+- title
+- contributing source or sources
+- PMID
+- DOI
+- journal or venue
+- publication date
+- authors
+- publication types
+- citation count where available
+- MeSH terms or concepts where available
+- abstract
+- links to PubMed, DOI, PMC full text, PDF/open access, and source records where available
 
-### Search for Drug Information
+Notes:
 
-Ask about a medication's uses, dosage, and safety information:
+- PubMed and Europe PMC are the most reliable Worker sources today.
+- OpenAlex and Semantic Scholar are implemented, but public unauthenticated calls can be rate-limited from Cloudflare egress. The tool reports source failures in the result notes instead of failing the whole search.
 
-```json
-{
-  "tool": "search-drugs",
-  "arguments": { "query": "Tylenol", "limit": 5 }
-}
+## Available Tools
+
+### Literature and Abstract Search
+
+`search-literature`
+
+Federated literature search with normalized output and deduplication. Best default tool for abstract trawling.
+
+`search-medical-literature`
+
+PubMed-only search with support for abstracts, date range, journal filter, publication types, pagination, and sort.
+
+`get-article-details`
+
+Fetch one PubMed article by PMID. Returns title, abstract, journal, authors, MeSH terms, DOI, PubMed link, PMC full-text link, and PDF link when available.
+
+`search-europe-pmc`
+
+Europe PMC search. Useful for broader biomedical abstract discovery and open-access/full-text availability.
+
+`search-openalex`
+
+OpenAlex work search. Useful for broad scholarly metadata, citation counts, concepts, DOI, OA pages, and PDF links when available. May be rate-limited without tuning or an API email/key strategy.
+
+`search-semantic-scholar`
+
+Semantic Scholar paper search. Useful for abstracts, citation counts, open PDF links, DOI, PubMed IDs, and scholarly metadata. May be rate-limited without an API key.
+
+`search-medical-databases`
+
+Combined PubMed and ClinicalTrials.gov search for quick literature plus trial context.
+
+### Genetics and Metabolomics
+
+`search-clinvar`
+
+Search ClinVar variants and clinical significance metadata. Useful for gene, variant, accession, pathogenicity, and genomic-location lookups.
+
+`search-gwas-catalog`
+
+Search GWAS Catalog studies by exact trait name. Useful for genotype-trait association discovery, neurogenetics, metabolic traits, accession IDs, sample sizes, and linked PubMed studies.
+
+`search-metabolomics-workbench`
+
+Search Metabolomics Workbench studies. Useful for metabolomics datasets, species, analysis type, sample count, release date, study page, and license links.
+
+`search-uniprot`
+
+Search UniProt proteins. Useful for gene/protein function, functional annotations, accessions, PDB cross-references, and biological interpretation.
+
+### Drugs and Health Statistics
+
+`search-drugs`
+
+Search FDA drug labels by brand or generic name.
+
+`get-drug-details`
+
+Fetch FDA label details by National Drug Code.
+
+`search-drug-nomenclature`
+
+Search RxNorm for standardized drug names and RxCUIs.
+
+`get-health-statistics`
+
+Search WHO Global Health Observatory indicators, optionally filtered by country.
+
+`get-cache-stats`
+
+Placeholder on the Worker deployment. Worker cache storage is not enabled yet.
+
+## Source Coverage
+
+| Source | Used For | Links Returned |
+| --- | --- | --- |
+| PubMed | Biomedical abstracts, MeSH terms, publication metadata | PubMed, DOI, PMC full text, PMC PDF |
+| Europe PMC | Biomedical abstracts, OA/full-text metadata | Europe PMC, PubMed, DOI, PMC full text, PMC PDF |
+| OpenAlex | Broad scholarly metadata, citations, concepts | OpenAlex, DOI, landing page, OA/PDF when available |
+| Semantic Scholar | Abstracts, citations, paper graph metadata | Semantic Scholar, DOI, PubMed, OA/PDF when available |
+| ClinVar | Variant and clinical-significance metadata | ClinVar record |
+| GWAS Catalog | GWAS studies and traits | GWAS record, PubMed |
+| Metabolomics Workbench | Metabolomics studies and metadata | Study page, license |
+| UniProt | Protein/gene functional annotation | UniProt record |
+| FDA openFDA | Drug label metadata | FDA-derived label fields |
+| RxNorm | Normalized drug terminology | RxCUI metadata |
+| WHO GHO | Health indicators | WHO API-derived values |
+
+## Deploy Your Own Worker
+
+Requirements:
+
+- Node.js 18+
+- npm
+- Cloudflare account
+- Wrangler authentication or `CLOUDFLARE_API_TOKEN`
+
+Install dependencies:
+
+```bash
+npm install
 ```
 
-### Get Health Statistics
+Build the local Node server:
 
-Retrieve global health indicators like life expectancy or mortality rates:
-
-```json
-{
-  "tool": "get-health-statistics",
-  "arguments": {
-    "indicator": "Life expectancy at birth (years)",
-    "country": "USA"
-  }
-}
+```bash
+npm run build
 ```
 
-### Search Medical Literature
+Dry-run Worker deployment:
 
-Find peer-reviewed research articles on any medical topic:
-
-```json
-{
-  "tool": "search-medical-literature",
-  "arguments": { "query": "COVID-19 treatment", "max_results": 10 }
-}
+```bash
+npx wrangler deploy --dry-run
 ```
 
-## Data Sources
+Deploy:
 
-| Source                 | Coverage                                                     | Update Frequency |
-| ---------------------- | ------------------------------------------------------------ | ---------------- |
-| **FDA**                | All FDA-approved drugs (US)                                  | Real-time        |
-| **WHO**                | Global health stats (194 countries)                          | Annual           |
-| **PubMed**             | 30M+ medical citations                                       | Daily            |
-| **RxNorm**             | Standardized drug nomenclature (US)                          | Weekly           |
-| **Google Scholar**     | Academic papers across disciplines                           | Real-time        |
-| **AAP**                | Bright Futures guidelines & policy statements                | Periodic         |
-| **Pediatric Journals** | Major pediatric journals (Pediatrics, JAMA Pediatrics, etc.) | Daily            |
+```bash
+npm run deploy
+```
 
-## Security & Privacy
+The Worker entrypoint is:
 
-- ✅ **Localhost-only** – Server runs locally, no external access
-- ✅ **No data storage** – All queries are real-time, nothing saved
-- ✅ **Process isolation** – Medical data stays on your machine
-- ✅ **No API keys** – No credentials to manage or leak
+```text
+src/cloudflare-worker.ts
+```
 
-## Use Cases
+Wrangler config:
 
-- **Medical Researchers** – Quick literature reviews without paywalls
-- **Healthcare Developers** – Build prototypes with real medical data
-- **Students** – Access drug information and research papers
-- **Clinicians** – Reference tool for drug details and health statistics
-- **Pediatricians** – AAP guidelines, Bright Futures, pediatric literature, and child health data
+```text
+wrangler.jsonc
+```
 
-## Caching
+## Local Node Server
 
-The server includes an in-memory caching layer to improve response times and reduce API calls:
+The original Node MCP server is still available.
 
-- **Automatic Caching**: All API responses are cached with source-specific TTL policies
-- **TTL Policies**:
-  - FDA data: 24 hours
-  - PubMed articles: 1 hour
-  - WHO statistics: 7 days
-  - RxNorm nomenclature: 30 days
-  - Clinical guidelines: 7 days
-  - Google Scholar: 1 hour
-  - Bright Futures: 30 days
-  - AAP Policy: 7 days
-  - Pediatric journals: 1 hour
-  - Child health indicators: 7 days
-  - Pediatric drugs: 24 hours
-- **Cache Management**: Automatic cleanup of expired entries every 5 minutes
-- **LRU Eviction**: Least recently used entries are evicted when cache exceeds 1000 entries
-- **Cache Statistics**: Use `get-cache-stats` tool to view hit rates and memory usage
+Build:
 
-**Configuration** (via environment variables):
+```bash
+npm install
+npm run build
+```
 
-- `CACHE_ENABLED=true` - Enable/disable caching (default: true)
-- `CACHE_MAX_SIZE=1000` - Maximum cache entries (default: 1000)
-- `CACHE_TTL_FDA=86400` - FDA TTL in seconds (default: 86400)
-- `CACHE_TTL_PUBMED=3600` - PubMed TTL in seconds (default: 3600)
-- `CACHE_TTL_WHO=604800` - WHO TTL in seconds (default: 604800)
-- `CACHE_TTL_RXNORM=2592000` - RxNorm TTL in seconds (default: 2592000)
-- `CACHE_CLEANUP_INTERVAL=300000` - Cleanup interval in milliseconds (default: 300000)
+Run stdio:
 
-**Performance**: Cached responses typically return in <10ms vs 800-1500ms for API calls. Expected cache hit rate: 60%+ for common queries.
+```bash
+npm start
+```
 
-## Technical Details
+Run HTTP:
 
-**Built with:** Node.js, TypeScript, MCP SDK  
-**Dependencies:** `@modelcontextprotocol/sdk`, `superagent`, `puppeteer`, `zod`  
-**Platforms:** macOS, Windows, Linux
+```bash
+npm run start:http
+```
 
-**Note:** Google Scholar access uses web scraping with rate limiting. Other sources use official APIs.
+Local HTTP endpoint:
+
+```text
+http://localhost:3000/mcp
+```
+
+The local Node server can support features that are not suitable for plain Cloudflare Workers, such as Puppeteer-backed scraping.
+
+## Limitations
+
+- The Cloudflare Worker does not run Puppeteer, Express, or local in-memory cache logic.
+- Google Scholar and browser-scraped AAP/journal pages are not part of the Worker deployment.
+- OpenAlex and Semantic Scholar may rate-limit unauthenticated calls from Worker egress. Add API-key support or backoff if those become core sources.
+- Full text is only linked when an upstream API exposes an open full-text or PDF URL. The MCP does not bypass paywalls.
 
 ## Medical Disclaimer
 
-⚠️ **Important**: This tool provides information from authoritative sources but should **not** replace professional medical advice, diagnosis, or treatment. Always consult qualified healthcare professionals for medical decisions.
-
-## Contributing
-
-⭐ **If this project helps you, please star it on GitHub!** ⭐
-
-Contributions welcome! Please open an issue or submit a pull request.
+This project retrieves biomedical and medical information from public data sources for research, education, and software workflows. It is not medical advice and must not be used as the sole basis for diagnosis, treatment, or clinical decisions. Always consult qualified healthcare professionals for patient care.
 
 ## License
 
-MIT License – see [LICENSE.md](LICENSE.md) for details.
-
-## Support
-
-If you find this project useful, consider supporting it:
-
-**⚡ Lightning Network**
-
-```
-lnbc1pjhhsqepp5mjgwnvg0z53shm22hfe9us289lnaqkwv8rn2s0rtekg5vvj56xnqdqqcqzzsxqyz5vqsp5gu6vh9hyp94c7t3tkpqrp2r059t4vrw7ps78a4n0a2u52678c7yq9qyyssq7zcferywka50wcy75skjfrdrk930cuyx24rg55cwfuzxs49rc9c53mpz6zug5y2544pt8y9jflnq0ltlha26ed846jh0y7n4gm8jd3qqaautqa
-```
-
-**₿ Bitcoin**: [bc1ptzvr93pn959xq4et6sqzpfnkk2args22ewv5u2th4ps7hshfaqrshe0xtp](https://mempool.space/address/bc1ptzvr93pn959xq4et6sqzpfnkk2args22ewv5u2th4ps7hshfaqrshe0xtp)
-
-**Ξ Ethereum/EVM**: [0x42ea529282DDE0AA87B42d9E83316eb23FE62c3f](https://etherscan.io/address/0x42ea529282DDE0AA87B42d9E83316eb23FE62c3f)
+MIT License. See [LICENSE.md](LICENSE.md).
