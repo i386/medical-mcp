@@ -102,6 +102,95 @@ const tools = [
     },
   },
   {
+    name: "search-europe-pmc",
+    description: "Search Europe PMC for biomedical abstracts and full-text/PDF availability links",
+    inputSchema: {
+      type: "object",
+      properties: {
+        query: { type: "string" },
+        max_results: { type: "number", minimum: 1, maximum: 50, default: 10 },
+        include_abstracts: { type: "boolean", default: true },
+        cursor: { type: "string", description: "Europe PMC cursorMark for pagination" },
+      },
+      required: ["query"],
+    },
+  },
+  {
+    name: "search-openalex",
+    description: "Search OpenAlex works for abstracts, DOI, open-access pages, and PDF links",
+    inputSchema: {
+      type: "object",
+      properties: {
+        query: { type: "string" },
+        max_results: { type: "number", minimum: 1, maximum: 50, default: 10 },
+        page: { type: "number", minimum: 1, default: 1 },
+      },
+      required: ["query"],
+    },
+  },
+  {
+    name: "search-semantic-scholar",
+    description: "Search Semantic Scholar for abstracts, citations, open PDFs, and external IDs",
+    inputSchema: {
+      type: "object",
+      properties: {
+        query: { type: "string" },
+        max_results: { type: "number", minimum: 1, maximum: 20, default: 10 },
+        offset: { type: "number", minimum: 0, default: 0 },
+      },
+      required: ["query"],
+    },
+  },
+  {
+    name: "search-clinvar",
+    description: "Search ClinVar variants and clinical significance metadata",
+    inputSchema: {
+      type: "object",
+      properties: {
+        query: { type: "string" },
+        max_results: { type: "number", minimum: 1, maximum: 20, default: 10 },
+      },
+      required: ["query"],
+    },
+  },
+  {
+    name: "search-gwas-catalog",
+    description: "Search GWAS Catalog studies for traits, accessions, PubMed links, and catalog pages",
+    inputSchema: {
+      type: "object",
+      properties: {
+        query: { type: "string" },
+        max_results: { type: "number", minimum: 1, maximum: 20, default: 10 },
+        page: { type: "number", minimum: 0, default: 0 },
+      },
+      required: ["query"],
+    },
+  },
+  {
+    name: "search-metabolomics-workbench",
+    description: "Search Metabolomics Workbench studies with study pages and license links",
+    inputSchema: {
+      type: "object",
+      properties: {
+        query: { type: "string" },
+        max_results: { type: "number", minimum: 1, maximum: 20, default: 10 },
+      },
+      required: ["query"],
+    },
+  },
+  {
+    name: "search-uniprot",
+    description: "Search UniProt proteins for genetics/metabolic interpretation links and functional annotations",
+    inputSchema: {
+      type: "object",
+      properties: {
+        query: { type: "string" },
+        max_results: { type: "number", minimum: 1, maximum: 20, default: 10 },
+      },
+      required: ["query"],
+    },
+  },
+  {
     name: "get-cache-stats",
     description: "Get cache status for the Worker deployment",
     inputSchema: { type: "object", properties: {} },
@@ -222,8 +311,25 @@ function parsePubMedArticles(xml: string) {
       publicationTypes: allMatches(articleXml, /<PublicationType[^>]*>([\s\S]*?)<\/PublicationType>/g),
       meshTerms: allMatches(articleXml, /<DescriptorName[^>]*>([\s\S]*?)<\/DescriptorName>/g).slice(0, 12),
       abstract: abstractParts.join("\n"),
+      doi: firstMatch(articleXml, /<ArticleId IdType="doi">([\s\S]*?)<\/ArticleId>/),
+      pmc: firstMatch(articleXml, /<ArticleId IdType="pmc">([\s\S]*?)<\/ArticleId>/),
     };
   });
+}
+
+function abstractFromOpenAlex(index: Record<string, number[]> | null | undefined) {
+  if (!index) return "";
+  const words: string[] = [];
+  for (const [word, positions] of Object.entries(index)) {
+    for (const position of positions) words[position] = word;
+  }
+  return words.filter(Boolean).join(" ");
+}
+
+function valueAtPath(object: any, path: string[], fallback = "") {
+  let current = object;
+  for (const segment of path) current = current?.[segment];
+  return typeof current === "string" || typeof current === "number" ? String(current) : fallback;
 }
 
 function buildPubMedTerm(args: Record<string, unknown>) {
@@ -332,7 +438,13 @@ async function searchPubMed(args: Record<string, unknown>) {
     const mesh = article.meshTerms.length ? `\nMeSH: ${article.meshTerms.join("; ")}` : "";
     const types = article.publicationTypes.length ? `\nTypes: ${article.publicationTypes.join("; ")}` : "";
     const authors = article.authors.length ? `\nAuthors: ${article.authors.join(", ")}` : "";
-    return `${retstart + index + 1}. ${article.title || "Untitled"}\nPMID: ${article.pmid || ids[index]}\nJournal: ${article.journal || "Unknown"}\nPublished: ${article.pubDate || "Unknown"}${authors}${types}${mesh}${abstract}\nURL: https://pubmed.ncbi.nlm.nih.gov/${article.pmid || ids[index]}/`;
+    const links = [
+      `PubMed: https://pubmed.ncbi.nlm.nih.gov/${article.pmid || ids[index]}/`,
+      article.doi ? `DOI: https://doi.org/${article.doi}` : "",
+      article.pmc ? `Free full text: https://pmc.ncbi.nlm.nih.gov/articles/${article.pmc}/` : "",
+      article.pmc ? `PDF: https://pmc.ncbi.nlm.nih.gov/articles/${article.pmc}/pdf/` : "",
+    ].filter(Boolean).join("\n");
+    return `${retstart + index + 1}. ${article.title || "Untitled"}\nPMID: ${article.pmid || ids[index]}\nJournal: ${article.journal || "Unknown"}\nPublished: ${article.pubDate || "Unknown"}${authors}${types}${mesh}${abstract}\n${links}`;
   });
   return textResult(`Query: ${term}\nShowing ${retstart + 1}-${retstart + rows.length} of ${search.esearchresult?.count ?? "unknown"} PubMed results.\n\n${rows.join("\n\n")}`);
 }
@@ -353,7 +465,10 @@ async function getArticleDetails(args: Record<string, unknown>) {
     `Types: ${article.publicationTypes.join("; ") || "Unknown"}`,
     `MeSH: ${article.meshTerms.join("; ") || "None listed"}`,
     `Abstract: ${article.abstract || "No abstract available."}`,
-    `URL: https://pubmed.ncbi.nlm.nih.gov/${pmid}/`,
+    `PubMed: https://pubmed.ncbi.nlm.nih.gov/${pmid}/`,
+    article.doi ? `DOI: https://doi.org/${article.doi}` : "",
+    article.pmc ? `Free full text: https://pmc.ncbi.nlm.nih.gov/articles/${article.pmc}/` : "",
+    article.pmc ? `PDF: https://pmc.ncbi.nlm.nih.gov/articles/${article.pmc}/pdf/` : "",
   ].join("\n\n"));
 }
 
@@ -367,6 +482,130 @@ async function searchMedicalDatabases(args: Record<string, unknown>) {
     return `${index + 1}. ${protocol.identificationModule?.briefTitle ?? "Untitled"}\nNCT ID: ${id}\nStatus: ${protocol.statusModule?.overallStatus ?? "Unknown"}\nURL: https://clinicaltrials.gov/study/${id}`;
   });
   return textResult(`PubMed\n\n${pubmed.content[0].text}\n\nClinicalTrials.gov\n\n${trialRows.join("\n\n") || "No trials found."}`);
+}
+
+async function searchEuropePmc(args: Record<string, unknown>) {
+  const params = new URLSearchParams({
+    query: asString(args.query).trim(),
+    format: "json",
+    resultType: "core",
+    pageSize: String(asInteger(args.max_results, 10, 1, 50)),
+    cursorMark: asString(args.cursor, "*") || "*",
+  });
+  const data = await fetchJson(`https://www.ebi.ac.uk/europepmc/webservices/rest/search?${params}`);
+  const includeAbstracts = args.include_abstracts !== false;
+  const rows = (data.resultList?.result ?? []).map((item: any, index: number) => {
+    const links = [
+      item.pmid ? `PubMed: https://pubmed.ncbi.nlm.nih.gov/${item.pmid}/` : "",
+      item.pmcid ? `Free full text: https://pmc.ncbi.nlm.nih.gov/articles/${item.pmcid}/` : "",
+      item.pmcid ? `PDF: https://pmc.ncbi.nlm.nih.gov/articles/${item.pmcid}/pdf/` : "",
+      item.doi ? `DOI: https://doi.org/${item.doi}` : "",
+      `Europe PMC: https://europepmc.org/article/${item.source}/${item.id}`,
+    ].filter(Boolean).join("\n");
+    return `${index + 1}. ${decodeXml(item.title ?? "Untitled")}\nPMID: ${item.pmid ?? "N/A"}\nJournal: ${item.journalTitle ?? "Unknown"}\nPublished: ${item.pubYear ?? "Unknown"}\nAuthors: ${item.authorString ?? "Unknown"}\nCited by: ${item.citedByCount ?? "Unknown"}${includeAbstracts ? `\nAbstract: ${decodeXml(item.abstractText ?? "No abstract available.")}` : ""}\n${links}`;
+  });
+  return textResult(`Next cursor: ${data.nextCursorMark ?? "N/A"}\n\n${rows.join("\n\n") || "No Europe PMC results found."}`);
+}
+
+async function searchOpenAlex(args: Record<string, unknown>) {
+  const params = new URLSearchParams({
+    search: asString(args.query).trim(),
+    "per-page": String(asInteger(args.max_results, 10, 1, 50)),
+    page: String(asInteger(args.page, 1, 1, 10000)),
+  });
+  const data = await fetchJson(`https://api.openalex.org/works?${params}`);
+  const rows = (data.results ?? []).map((work: any, index: number) => {
+    const source = work.primary_location?.source?.display_name ?? "Unknown";
+    const pdf = work.open_access?.oa_url || work.primary_location?.pdf_url;
+    const landing = work.primary_location?.landing_page_url || work.id;
+    const authors = (work.authorships ?? []).slice(0, 8).map((a: any) => a.author?.display_name).filter(Boolean).join(", ");
+    const links = [
+      work.ids?.pmid ? `PubMed: ${work.ids.pmid}` : "",
+      work.doi ? `DOI: ${work.doi}` : "",
+      landing ? `Landing page: ${landing}` : "",
+      pdf ? `PDF/Open access: ${pdf}` : "",
+      work.id ? `OpenAlex: ${work.id}` : "",
+    ].filter(Boolean).join("\n");
+    return `${index + 1}. ${work.title ?? "Untitled"}\nVenue: ${source}\nPublished: ${work.publication_date ?? work.publication_year ?? "Unknown"}\nAuthors: ${authors || "Unknown"}\nCited by: ${work.cited_by_count ?? "Unknown"}\nAbstract: ${abstractFromOpenAlex(work.abstract_inverted_index) || "No abstract available."}\n${links}`;
+  });
+  return textResult(rows.join("\n\n") || "No OpenAlex results found.");
+}
+
+async function searchSemanticScholar(args: Record<string, unknown>) {
+  const params = new URLSearchParams({
+    query: asString(args.query).trim(),
+    limit: String(asInteger(args.max_results, 10, 1, 20)),
+    offset: String(asInteger(args.offset, 0, 0, 10000)),
+    fields: "title,abstract,year,venue,authors,url,publicationTypes,publicationDate,externalIds,openAccessPdf,citationCount",
+  });
+  const data = await fetchJson(`https://api.semanticscholar.org/graph/v1/paper/search?${params}`);
+  const rows = (data.data ?? []).map((paper: any, index: number) => {
+    const authors = (paper.authors ?? []).slice(0, 8).map((author: any) => author.name).filter(Boolean).join(", ");
+    const links = [
+      paper.externalIds?.PubMed ? `PubMed: https://pubmed.ncbi.nlm.nih.gov/${paper.externalIds.PubMed}/` : "",
+      paper.externalIds?.DOI ? `DOI: https://doi.org/${paper.externalIds.DOI}` : "",
+      paper.openAccessPdf?.url ? `PDF/Open access: ${paper.openAccessPdf.url}` : "",
+      paper.url ? `Semantic Scholar: ${paper.url}` : "",
+    ].filter(Boolean).join("\n");
+    return `${index + 1}. ${paper.title ?? "Untitled"}\nVenue: ${paper.venue ?? "Unknown"}\nPublished: ${paper.publicationDate ?? paper.year ?? "Unknown"}\nAuthors: ${authors || "Unknown"}\nCitations: ${paper.citationCount ?? "Unknown"}\nTypes: ${(paper.publicationTypes ?? []).join("; ") || "Unknown"}\nAbstract: ${paper.abstract ?? "No abstract available."}\n${links}`;
+  });
+  return textResult(`Total: ${data.total ?? "Unknown"}\nNext offset: ${data.next ?? "N/A"}\n\n${rows.join("\n\n") || "No Semantic Scholar results found."}`);
+}
+
+async function searchClinVar(args: Record<string, unknown>) {
+  const max = asInteger(args.max_results, 10, 1, 20);
+  const search = await fetchJson(`https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?db=clinvar&term=${encodeURIComponent(asString(args.query).trim())}&retmode=json&retmax=${max}`);
+  const ids = search.esearchresult?.idlist ?? [];
+  if (!ids.length) return textResult("No ClinVar variants found.");
+  const data = await fetchJson(`https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi?db=clinvar&id=${ids.join(",")}&retmode=json`);
+  const rows = ids.map((id: string, index: number) => {
+    const item = data.result?.[id] ?? {};
+    const location = item.variation_set?.[0]?.variation_loc?.[0];
+    return `${index + 1}. ${item.title ?? "Untitled"}\nAccession: ${item.accession_version ?? item.accession ?? "Unknown"}\nType: ${item.obj_type ?? item.variation_set?.[0]?.variant_type ?? "Unknown"}\nClinical significance: ${item.clinical_significance?.description ?? "Unknown"}\nGene: ${(item.gene_sort ?? "").trim() || "Unknown"}\nLocation: ${location ? `${location.assembly_name} chr${location.chr}:${location.display_start}-${location.display_stop}` : "Unknown"}\nClinVar: https://www.ncbi.nlm.nih.gov/clinvar/variation/${id}/`;
+  });
+  return textResult(rows.join("\n\n"));
+}
+
+async function searchGwasCatalog(args: Record<string, unknown>) {
+  const max = asInteger(args.max_results, 10, 1, 20);
+  const page = asInteger(args.page, 0, 0, 10000);
+  const trait = encodeURIComponent(asString(args.query).trim());
+  const data = await fetchJson(`https://www.ebi.ac.uk/gwas/rest/api/studies/search/findByDiseaseTrait?diseaseTrait=${trait}&page=${page}&size=${max}`);
+  const studies = data._embedded?.studies ?? [];
+  const rows = studies.map((study: any, index: number) => {
+    const publication = study.publicationInfo ?? {};
+    return `${index + 1}. ${publication.title ?? study.diseaseTrait?.trait ?? "Untitled"}\nTrait: ${study.diseaseTrait?.trait ?? "Unknown"}\nAccession: ${study.accessionId ?? "Unknown"}\nPublication: ${publication.publication ?? "Unknown"} (${publication.publicationDate ?? "Unknown"})\nPMID: ${publication.pubmedId ?? "N/A"}\nInitial sample: ${study.initialSampleSize ?? "Unknown"}\nReplication sample: ${study.replicationSampleSize ?? "Unknown"}\nPubMed: ${publication.pubmedId ? `https://pubmed.ncbi.nlm.nih.gov/${publication.pubmedId}/` : "N/A"}\nGWAS Catalog: ${study._links?.self?.href ?? (study.accessionId ? `https://www.ebi.ac.uk/gwas/studies/${study.accessionId}` : "N/A")}`;
+  });
+  return textResult(rows.join("\n\n") || `No GWAS Catalog studies found for exact trait "${asString(args.query)}". Try the catalog trait label, e.g. "Alzheimer's disease".`);
+}
+
+async function searchMetabolomicsWorkbench(args: Record<string, unknown>) {
+  const query = encodeURIComponent(asString(args.query).trim());
+  const max = asInteger(args.max_results, 10, 1, 20);
+  const data = await fetchJson(`https://www.metabolomicsworkbench.org/rest/study/study_title/${query}/summary`);
+  const studies = Object.values(data ?? {}).slice(0, max) as any[];
+  const rows = studies.map((study, index) => `${index + 1}. ${study.study_title ?? "Untitled"}\nStudy ID: ${study.study_id ?? "Unknown"}\nSpecies: ${study.species ?? "Unknown"}\nAnalysis: ${study.analysis_type ?? "Unknown"}\nSamples: ${study.number_of_samples ?? "Unknown"}\nReleased: ${study.release_date ?? "Unknown"}\nLicense: ${study.license ?? "Unknown"}\nStudy page: ${study.study_url ?? (study.study_id ? `https://www.metabolomicsworkbench.org/data/DRCCMetadata.php?Mode=Study&StudyID=${study.study_id}` : "N/A")}\nLicense URL: ${study.license_url ?? "N/A"}`);
+  return textResult(rows.join("\n\n") || "No Metabolomics Workbench studies found.");
+}
+
+async function searchUniprot(args: Record<string, unknown>) {
+  const max = asInteger(args.max_results, 10, 1, 20);
+  const params = new URLSearchParams({
+    query: asString(args.query).trim(),
+    fields: "accession,id,protein_name,gene_names,organism_name,cc_function,xref_pdb",
+    format: "json",
+    size: String(max),
+  });
+  const data = await fetchJson(`https://rest.uniprot.org/uniprotkb/search?${params}`);
+  const rows = (data.results ?? []).map((entry: any, index: number) => {
+    const accession = entry.primaryAccession;
+    const protein = valueAtPath(entry, ["proteinDescription", "recommendedName", "fullName", "value"], entry.uniProtkbId ?? "Unknown");
+    const genes = (entry.genes ?? []).map((gene: any) => gene.geneName?.value).filter(Boolean).join(", ");
+    const functionText = (entry.comments ?? []).find((comment: any) => comment.commentType === "FUNCTION")?.texts?.map((text: any) => text.value).join(" ") ?? "No function annotation.";
+    const pdbs = (entry.uniProtKBCrossReferences ?? []).filter((xref: any) => xref.database === "PDB").slice(0, 8).map((xref: any) => xref.id);
+    return `${index + 1}. ${protein}\nAccession: ${accession ?? "Unknown"}\nEntry: ${entry.uniProtkbId ?? "Unknown"}\nGenes: ${genes || "Unknown"}\nOrganism: ${entry.organism?.scientificName ?? "Unknown"}\nFunction: ${functionText}\nPDB: ${pdbs.join(", ") || "None listed"}\nUniProt: ${accession ? `https://www.uniprot.org/uniprotkb/${accession}/entry` : "N/A"}`;
+  });
+  return textResult(rows.join("\n\n") || "No UniProt results found.");
 }
 
 async function callTool(name: string, args: Record<string, unknown>) {
@@ -395,6 +634,20 @@ async function callTool(name: string, args: Record<string, unknown>) {
       return getArticleDetails(args);
     case "search-medical-databases":
       return searchMedicalDatabases(args);
+    case "search-europe-pmc":
+      return searchEuropePmc(args);
+    case "search-openalex":
+      return searchOpenAlex(args);
+    case "search-semantic-scholar":
+      return searchSemanticScholar(args);
+    case "search-clinvar":
+      return searchClinVar(args);
+    case "search-gwas-catalog":
+      return searchGwasCatalog(args);
+    case "search-metabolomics-workbench":
+      return searchMetabolomicsWorkbench(args);
+    case "search-uniprot":
+      return searchUniprot(args);
     case "get-cache-stats":
       return textResult("Cloudflare Workers cache storage is not enabled for this deployment.");
     default:
